@@ -120,7 +120,8 @@ function HintAutoWindow:show()
    win.wo.foldenable = false
    win.wo.wrap = false
 
-   vim.o.eventignore = nil -- turn on autocommands
+   -- qrs: mod
+   vim.o.eventignore = '' -- turn on autocommands
 
    autocmd('TabEnter', { group = augroup, callback = function()
       if self.win:is_valid() then
