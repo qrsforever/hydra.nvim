@@ -64,6 +64,7 @@ local Layer = class()
 ---@field on_key? function
 ---@field on_enter? table<integer, function>
 ---@field on_exit? table<integer, function>
+
 ---@param input table
 function Layer:initialize(input)
    self.active = false
@@ -112,7 +113,7 @@ function Layer:initialize(input)
       -- But `vim.tbl_deep_extend` function makes a copy if extend `getfenv()`
       -- with not empty table; another way, it returns the reference to the
       -- original table.
-      -- TODO erlangai  Error running config for venn.nvim: vim/shared.lua:0: s: expected string, got number
+      -- erlangai mod.
       -- local env = vim.tbl_deep_extend('force', getfenv(), {
       --    vim = { o = {}, go = {}, bo = {}, wo = {} }
       -- }) --[[@as table]]
@@ -120,10 +121,152 @@ function Layer:initialize(input)
       -- env.vim.go = self.options.go
       -- env.vim.bo = self.options.bo
       -- env.vim.wo = self.options.wo
+      local env = {
+         vim = {
+            o  = self.options.o,
+            go = self.options.go,
+            bo = self.options.bo,
+            wo = self.options.wo,
+         }
+      }
+      setmetatable(env.vim, { __index = _G.vim })
+      setmetatable(env, { __index = _G })
 
+      for _, fun in pairs(self.config.on_enter) do
+         setfenv(fun, env)
+      end
+   end
+   if self.config.on_exit then
+         ---@param name string
+         local function show_disable_message(name)
+            util.warn(string.format(
+               '[Hydra] "vim.%s" meta-accessor is disabled inside config.on_exit() function',
+               name))
+         end
 
+         -- erlangai mod.
+         local env = {
+            vim = { o = {}, go = {}, bo = {}, wo = {} }
+         }
+         setmetatable(env.vim, { __index = _G.vim })
+         setmetatable(env, { __index = _G })
+         env.vim.o  = self.options:make_meta_accessor(
+            function(opt)
+               return api.nvim_get_option_value(opt, {})
+            end,
+            function() show_disable_message('o') end
+         )
+         env.vim.go = self.options:make_meta_accessor(
+            function(opt)
+               return api.nvim_get_option_value(opt, { scope = 'global' })
+            end,
+            function() show_disable_message('go') end
+         )
+         env.vim.bo = self.options:make_meta_accessor(
+            function(opt)
+               return api.nvim_buf_get_option(0, opt)
+            end,
+            function() show_disable_message('bo') end
+         )
+         env.vim.wo = self.options:make_meta_accessor(
+            function(opt)
+               return api.nvim_win_get_option(0, opt)
+            end,
+            function() show_disable_message('wo') end
+         )
+
+      for _, fun in pairs(self.config.on_exit) do
+         setfenv(fun, env)
+      end
    end
 
+   local exit_keymaps
+   self.enter_keymaps, self.layer_keymaps, exit_keymaps =
+      self:_normalize_input(input.enter, input.layer, input.exit)
+
+   do
+      local k = {}
+      for _, keymaps in ipairs({self.layer_keymaps, exit_keymaps}) do
+         for mode, _ in pairs(keymaps) do
+            k[mode] = k[mode] or {}
+            for lhs, _ in pairs(keymaps[mode]) do
+               k[mode][termcodes(lhs)] = lhs
+            end
+         end
+      end
+      self.esc_termcodes_layer_keymaps = k
+   end
+
+   -- Setup <Esc> key to exit the Layer if no one exit key has been passed.
+   if not exit_keymaps then
+      exit_keymaps = {}
+      for mode, _ in pairs(self.layer_keymaps) do
+         exit_keymaps[mode] = { ['<Esc>'] = {} }
+      end
+   end
+
+   if self.enter_keymaps then
+      for mode, keymaps in pairs(self.enter_keymaps) do
+         for lhs, map in pairs(keymaps) do
+            local rhs  = map[1]
+            local opts = map[2] or {}
+
+            local keymap = self:_make_keymap_function(mode, rhs, opts)
+
+            vim.keymap.set(mode, lhs, function()
+               keymap()
+               self:activate()
+            end, {
+               buffer = self.config.buffer,
+               nowait = opts.nowait,
+               silent = opts.silent,
+               desc = opts.desc or self.config.desc
+            })
+         end
+      end
+   end
+
+   -- Setup layer keybindings
+   for mode, maps in pairs(self.layer_keymaps) do
+      for lhs, map in pairs(maps) do
+         local rhs, opts = map[1], map[2] or {}
+         local keymap = self:_make_keymap_function(mode, rhs, opts)
+
+         self.layer_keymaps[mode][lhs] = {
+            function()
+               keymap()
+               if self.config.on_key then self.config.on_key() end
+               if self.config.timeout then self:_timer() end
+            end,
+            {
+               nowait = opts.nowait,
+               silent = opts.silent,
+               desc = opts.desc
+            }
+         }
+      end
+   end
+
+   -- Setup keybindings to exit Layer
+   if exit_keymaps then
+      for mode, keymaps in pairs(exit_keymaps) do
+         for lhs, map in pairs(keymaps) do
+            local rhs, opts = map[1], map[2] or {}
+
+            local keymap = self:_make_keymap_function(mode, rhs, opts)
+            local rhs_fun = opts.exit_before
+                            and function() self:exit(); keymap() end
+                            or  function() keymap(); self:exit() end
+
+            self.layer_keymaps[mode] = self.layer_keymaps[mode] or {}
+            self.layer_keymaps[mode][lhs] = { rhs_fun, {
+               nowait = opts.nowait,
+               silent = opts.silent,
+               desc = opts.desc
+            }}
+         end
+      end
+   end
 end
 
 ---Activate layer
